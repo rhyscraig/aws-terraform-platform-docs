@@ -11,10 +11,15 @@ absent because those cost money, not because they were overlooked — see the en
 > not exist anywhere: CloudTrail, IAM Access Analyzer, account-level S3 block-public-access, and
 > enforced PR review. This file asserted a posture that was not real.
 >
-> CloudTrail and Access Analyzer have since been **built and verified live** (see below). The
-> other two remain open. **Treat every line in this file as a claim to verify, not a given, until
-> it has a live check behind it** — the failure mode here wasn't a wrong decision, it was
-> documentation drifting ahead of implementation and then being trusted.
+> Three of the four have since been **built and verified live** — CloudTrail, Access Analyzer, and
+> account-level S3 block-public-access (plus EBS default encryption and an IAM password policy,
+> which were missing for the same reason). **Enforced PR review remains open** and is blocked on
+> GitHub billing, not on effort — see the entry below.
+>
+> **Treat every line in this file as a claim to verify, not a given, until it has a live check
+> behind it.** The failure mode here wasn't a wrong decision — every control listed was the right
+> control. It was documentation drifting ahead of implementation and then being trusted, for
+> months, by both humans and agents reading this file as a statement of fact.
 
 ## On, by design
 
@@ -41,9 +46,8 @@ absent because those cost money, not because they were overlooked — see the en
   `aws-terraform-platform-aws-org/security.tf`. Findings are not routed anywhere yet — no
   EventBridge rule, no SNS — because there's no habit of triaging them yet; wire that up once
   there is.
-- ~~**S3 block-public-access** — on for every bucket, always, no exceptions.~~ See the corrected
-  entry below — the account-level control is absent and the SCP that was meant to enforce it was
-  never deployed.
+- **S3 block-public-access** — now true at BOTH levels. See the corrected entry below for what was
+  actually wrong and what was built.
 - **MFA / root credentials** — management account root has MFA enabled. All six **member** accounts
   had `AccountMFAEnabled=0`, and hcp-terrorgems-prod had a live root password with no MFA on it.
   Resolved 2026-07-29 by enabling AWS Organizations centralized root access
@@ -58,19 +62,33 @@ absent because those cost money, not because they were overlooked — see the en
   [CICD_ROLES.md](CICD_ROLES.md)) exists specifically for this: a compromised plan-phase token
   (runs unattended, on every push) can never mutate real infrastructure, full stop, not just by
   convention.
-- **S3 block-public-access** — set per-bucket by the seed repo's own Terraform (state + logs
-  buckets pass all four `block_*`/`ignore_*`/`restrict_*` flags). **The account-level control is
-  NOT set**: `aws s3control get-public-access-block` returns `NoSuchPublicAccessBlockConfiguration`
-  in every one of the 7 accounts, so nothing stops a *new* bucket being made public. The SCP meant
-  to backstop this (`DenyS3PublicAccess`) was written in
-  `aws-terraform-platform-aws-baselines/terraform/security/main.tf` but **never deployed** — that
-  module isn't called, and wouldn't apply if it were (it references a deleted
-  `aws_kms_key.cloudtrail`, writes lifecycle rules to the non-existent bucket
-  `infra-tfstate-hoad-org-seed`, and attaches an SCP to an org ID rather than a root ID). A live
-  `list-policies` shows 6 SCPs; that isn't one of them. `aws-terraform-platform-aws-modules`'
-  `security-baseline` module has the correct free resources
-  (`aws_s3_account_public_access_block`, `aws_ebs_encryption_by_default`,
-  `aws_iam_account_password_policy`) and **has zero consumers**.
+- **S3 block-public-access** — per-bucket (set by each repo's own Terraform) **and** account-level,
+  in all 7 accounts, verified live. The account-level control is the one that matters: it's the
+  backstop that catches a bucket nobody thought about. **It was absent everywhere until
+  2026-07-29** — `aws s3control get-public-access-block` returned
+  `NoSuchPublicAccessBlockConfiguration` in every account, while this file claimed "on for every
+  bucket, always, no exceptions". The SCP meant to backstop it (`DenyS3PublicAccess`, in
+  `aws-terraform-platform-aws-baselines/terraform/security/main.tf`) was never deployed and
+  couldn't have applied if it were: it references a deleted `aws_kms_key.cloudtrail`, writes
+  lifecycle rules to the non-existent bucket `infra-tfstate-hoad-org-seed`, and attaches an SCP to
+  an org ID rather than a root ID. Don't revive that module as-is.
+  Now managed in `aws-terraform-platform-aws-baselines/terraform/security-baseline` (six member
+  accounts, all six spokes applied green) and `aws-terraform-platform-aws-org/security.tf` (the
+  management account, which baselines structurally cannot reach — its provider assumes the
+  StackSet-vended cicd-role, which only exists in accounts under the targeted OUs).
+- **EBS encryption by default** — on in all 7 accounts across all three approved regions. Free:
+  EBS bills for volume storage, not for encrypting it. Nothing in this estate runs EC2 today,
+  which is precisely why it was worth setting — it costs nothing while there are no volumes, and
+  the first volume anyone ever creates is encrypted without them thinking about it. Same two repos
+  as above.
+- **IAM account password policy** — 24 chars, all character classes, 90-day max age, 24-password
+  reuse prevention. Enforces nothing today (zero IAM users in every account, verified live) and
+  that's deliberate: it's a tripwire for the day someone creates an IAM user in a hurry.
+  > `aws-terraform-platform-aws-modules`' `security-baseline` module declares these same three
+  > resources and had **zero consumers** from the day it was written. It is deliberately not used:
+  > it also declares `aws_default_vpc` with `force_destroy = true`, which *adopts* every account's
+  > default VPC into Terraform state and arms a destroy that would take the VPC, its subnets, IGW
+  > and route tables with it. See `aws-terraform-platform-aws-modules` PR #2.
 - **KMS encryption at rest** — the shared state bucket and (where applicable) workload data stores
   use KMS, not plaintext.
 - **Native S3 state locking** (`use_lockfile = true`) — prevents concurrent-apply corruption,
