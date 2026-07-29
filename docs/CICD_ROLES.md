@@ -1,5 +1,44 @@
 # CI/CD OIDC Roles
 
+## Status, 2026-07-29 — the combined role is down to one repo
+
+The legacy combined `workloads_oidc_role` (`hcp-cmc-euw1-platform-oidc-role`) attaches
+`seed_oidc_policy` — `iam:*`, `sts:*`, `s3:*`, `kms:*`, `cloudformation:*`, `organizations:*` —
+which is **org-admin in the management account**. Until 2026-07-29 it was trusted by **six** repos:
+the seed, `aws-org`, `terrorgems-platform`, `craighoad-portfolio-website`, `personal-ai-cloud` and
+`craighoad-blog`. Compromise of any one of them was org takeover.
+
+It is now trusted by exactly one — the seed itself, which genuinely needs those permissions
+because it manages the OIDC provider, all three roles, the KMS key, both S3 buckets and the
+StackSet. Live trust policy:
+
+```
+repo:hoad-org/aws-terraform-platform-seed:ref:refs/heads/main
+repo:hoad-org/aws-terraform-platform-seed:environment:hcp
+repo:hoad-org/aws-terraform-platform-seed:environment:hcp-approve
+```
+
+Two things worth carrying forward from how that was done:
+
+- **Four of the five removals turned out to be excess privilege that was never used at all.**
+  `craighoad-blog` and `personal-ai-cloud` authenticate against craighoad-prod's *own* plan/apply
+  roles (confirmed by reading 624426145233's live trust policies); `craighoad-portfolio-website`
+  was already on the split lists; `terrorgems-platform`'s pipeline references three GitHub secrets
+  that don't exist on it and has never completed. Verify what a grant is actually used for before
+  assuming a removal is risky — here, most of the risk was in keeping it.
+- **The role is kept, not deleted.** The KMS key policy, the state bucket policy and the
+  member-role StackSet trust all still name it by ARN.
+
+**Still open — the plan role is not actually read-only.** `plan_oidc_policy` grants
+`sts:AssumeRole` on `arn:aws:iam::*:role/hcp-cmc-euw1-platform-cicd-role`, and that StackSet-vended
+member role carries `iam:*`, `s3:*`, `kms:*`, `lambda:*`, `rds:*`, `route53:*`, `cloudfront:*` on
+`Resource: "*"`. So a plan-phase token — which runs unattended on every push — can assume its way
+to full write in every member account. The claim below that a compromised plan token "can never
+mutate real infrastructure, full stop" is **not true today**. Fixing it properly needs a second,
+read-only member role vended by the same StackSet and a way for the pipeline to pass a different
+role ARN per phase, which is a change across `github-automation` and every consuming repo — not a
+one-line fix, and not yet done.
+
 ## The split: plan / apply / module-skills
 
 Every repo's GitHub Actions pipeline authenticates via OIDC into one of three narrow roles,
@@ -11,12 +50,14 @@ never one broad combined role:
 | **apply** | `terraform apply` — write, real infrastructure mutation | `repo:{owner}/{repo}:ref:refs/heads/main` — see next section for why this isn't environment-scoped | Full write access to the specific AWS services that repo's Terraform manages — scoped per-repo, not blanket `*:*` |
 | **module-skills** (optional) | Non-infra pipelines (test runners, Claude skills, analytics) | `repo:{owner}/{repo}:environment:*` or wildcard subjects, only created when actually needed | Audit-log write + KMS for that write + caller-identity only — zero state/IAM access, smallest possible blast radius |
 
-**Why a role split, not one role for everything**: separation of duties. Even though (see below)
-the `-approve` GitHub Environment can't enforce a real required-reviewer gate at $0 cost, the plan
-role is still permanently, structurally incapable of mutating real infrastructure — a compromised
-or misconfigured plan-phase token (which runs on every push, unattended) can read state and
-secrets but can never write. That's a real, load-bearing security boundary independent of whatever
-the approval-gate story is for a given billing tier.
+**Why a role split, not one role for everything**: separation of duties. The intent is that a
+compromised or misconfigured plan-phase token — which runs on every push, unattended — can read
+state and secrets but never write, independent of whatever the approval-gate story is for a given
+billing tier.
+
+> ⚠️ **That intent is not yet realised.** The plan role's own IAM policy can't write, but it *can*
+> `sts:AssumeRole` into the member CICD role, which can. See "Status, 2026-07-29" at the top of
+> this file. Treat the plan role as write-capable in every member account until that's fixed.
 
 ## The real OIDC subject list — derived empirically, not from first principles
 
