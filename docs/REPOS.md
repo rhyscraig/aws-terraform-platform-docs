@@ -43,7 +43,7 @@ is the actual redesign work — not a green-field build.**
 | `aws-terraform-platform-aws-templates` | rhyscraig | ✅ | old `aws-workflows` + `SEED_ROLE_ARN`/`TF_STATE_BUCKET`/etc | via `-backend-config`; `.tfctl.yml` cites a **different management account** (`235494790978`) than everywhere else (`395101865577`) — unresolved discrepancy | no real deploy runs in recent history | ambiguous — `.tfctl.yml` bucket pattern `bt-terraform-remote-state-{region}` |
 | `aws-terraform-platform-aws-modules` | rhyscraig | ✅ | old `aws-workflows`, no deploy (pure module catalog) | none (no backend anywhere — correct, it's a module registry) | green (Dependabot only) | none |
 | `aws-terraform-platform-aws-workflows` | hoad-org | ✅ (but see "central architectural fact" above) | n/a — this **is** the older secrets/workflow provider | n/a | n/a | none directly, but see "Adjacent tooling" below |
-| `aws-terraform-solutions-terrorgems-platform` (renamed from `-terrorgem`) | rhyscraig | ✅ | old `aws-workflows`, many GH secrets incl. app secrets (`JWT_SECRET`, `TMDB_API_KEY`) mixed with infra secrets | root `backend.tf` orphaned/stale; real backends per-environment under `infra/aws/environments/*/backend.tf`; `scripts/deploy.sh` hardcodes a bucket/region that **doesn't match** the CI workflow's region | 2 real failures (Trivy findings, workflow parse error), otherwise green | none |
+| `aws-terraform-solutions-terrorgems-platform` (renamed from `-terrorgem`) | hoad-org | ✅ | bespoke `terraform-terrorgem-prd.yml`, not on `github-automation` — `SEED_ROLE_ARN`/`PLAN_PASSPHRASE`/`PROD_CICD_ROLE_ARN`/`TF_LOGS_BUCKET`/`TF_STATE_BUCKET`/`KMS_KEY_ID` live as **environment secrets on `terrorgem-prd`**, not repo secrets — easy to miss with `gh secret list` (repo-scope only); `JWT_SECRET`/`TMDB_API_KEY` (app secrets) are repo-scope | root `backend.tf` orphaned/stale; real backends per-environment under `infra/aws/environments/*/backend.tf`; `scripts/deploy.sh` hardcodes a bucket/region that **doesn't match** the CI workflow's region | **`ci.yml` on `main` red since 2026-04-26** (Python ruff/mypy/pytest/contracts/governance AND Frontend typecheck/lint/vitest both failing, confirmed live 2026-07-29, run 29491753794) — app-level, not infra. `terraform-terrorgem-prd.yml` only triggers via `workflow_run` after `ci` succeeds on `main`, so it has been silently **skipped** on every push since, not failed — 52 real successes before that, most recently 2026-04-24, so the deploy pipeline itself isn't known-broken, it's just never been reachable. Not investigated further this pass: app-level CI failures need product-code context this audit doesn't have. `PROD_CICD_ROLE_ARN`/`SEED_ROLE_ARN` also not verified live for staleness — untested since April. | none |
 | `aws-terraform-solutions-craighoad-blog` | hoad-org (redirects from rhyscraig) | ✅ | inline `SEED_ROLE_ARN` only, no reusable workflow calls at all | `terraform/backend.tf` (hardcoded) | **never actually executed** except Dependabot | none |
 | `craighoad-portfolio-website` (renamed from `website-static-html-craighoad.com`) | hoad-org | ❌ not `aws-terraform-*` prefixed | unknown — not independently re-audited this pass beyond OIDC trust | unknown | unknown | not re-confirmed |
 | `personal-ai-cloud` | hoad-org | ❌ not `aws-terraform-*` prefixed (defensible exception — app repo with embedded infra) | old `aws-workflows` (`hoad-org/` direct, not the `rhyscraig/` alias) — **not yet migrated to `github-automation` despite that being built this session for it** | `hcp/prd/personal-ai-cloud/*` (target: `workloads/craighoad.com/personal-ai-cloud/`) | 5/5 failures (all within 24h — likely the now-fixed OIDC subject issue, unconfirmed re-run) | none |
@@ -116,19 +116,28 @@ still meaningful.
 
 ## Currently-broken CI, ranked by urgency
 
-1. **`aws-org`** — every 4-hour drift-check cron failing, 100% failure rate.
-2. **`aws-baselines`** — daily drift-check failing 5/5 consecutive days.
-3. **`aws-accounts`** — drift-check failing (3/5 recent).
-4. **`personal-ai-cloud`** — deploy failing 5/5 in the last 24h, likely the now-fixed OIDC subject
-   gap, unconfirmed by re-run.
-5. **`aws-terraform-solutions-craighoad-blog`** — has never executed even once outside Dependabot.
+**Update, 2026-07-29 — all five items below are resolved.** `aws-org` migrated onto
+`github-automation` and its dead `drift-check.yaml` cron deleted (root cause: every job passed a
+GitHub secret, `AWS_OIDC_ROLE_ARN`, that never existed on the repo — confirmed
+`aws-terraform-platform-aws-org` PR #10). `aws-baselines` and `aws-accounts` were already migrated
+by the time of this pass; re-run and confirmed green. `personal-ai-cloud` and
+`aws-terraform-solutions-craighoad-blog` re-run and confirmed green (7/7 and 8/8 jobs). Left here
+for history, not as a current list — see each repo's own Actions tab for live status rather than
+trusting this section.
 
-(`aws-terraform-solutions-websites` was on this list — retired/archived instead, see "Retired
-repos" below.)
+1. ~~`aws-org` — every 4-hour drift-check cron failing, 100% failure rate.~~ Fixed.
+2. ~~`aws-baselines` — daily drift-check failing 5/5 consecutive days.~~ Fixed.
+3. ~~`aws-accounts` — drift-check failing (3/5 recent).~~ Fixed.
+4. ~~`personal-ai-cloud` — deploy failing 5/5 in the last 24h.~~ Fixed.
+5. ~~`aws-terraform-solutions-craighoad-blog` — had never executed outside Dependabot.~~ Fixed.
 
-All the `drift-check`/`drift_check` failures across `aws-org`/`aws-baselines`/`aws-accounts`
-complete in **0 seconds** — consistent with a fast pre-flight failure (auth/OIDC/secrets
-resolution), not real infrastructure drift. Not yet root-caused.
+**New entry, 2026-07-29**: **`aws-terraform-solutions-terrorgems-platform`** — `ci.yml` on `main`
+has been red since 2026-04-26 (Python ruff/mypy/pytest/contracts/governance AND Frontend
+typecheck/lint/vitest both failing). This is app-level, not infra — see the Summary table row
+above for the full finding, including that the deploy pipeline itself has 52 real historical
+successes and isn't known-broken, it's just been unreachable (its trigger requires `ci` green on
+`main`). Needs product-code investigation this audit doesn't have context for; not attempted this
+pass.
 
 ## Cross-repo backend/region inconsistencies (see [BACKEND.md](BACKEND.md) for the canonical target)
 
