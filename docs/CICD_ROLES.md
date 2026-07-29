@@ -23,9 +23,13 @@ Two things worth carrying forward from how that was done:
 - **Four of the five removals turned out to be excess privilege that was never used at all.**
   `craighoad-blog` and `personal-ai-cloud` authenticate against craighoad-prod's *own* plan/apply
   roles (confirmed by reading 624426145233's live trust policies); `craighoad-portfolio-website`
-  was already on the split lists; `terrorgems-platform`'s pipeline references three GitHub secrets
-  that don't exist on it and has never completed. Verify what a grant is actually used for before
-  assuming a removal is risky — here, most of the risk was in keeping it.
+  was already on the split lists; `terrorgems-platform`'s bespoke pipeline has always authenticated
+  via credentials in its `terrorgem-prd` GitHub *environment*, not this combined role, so it never
+  used this grant either — see [REPOS.md](REPOS.md) for that repo's real, corrected CI status
+  (initially misreported in this same PR, then corrected twice — worth reading as a caution about
+  checking environment-scoped secrets, not just repo-scoped ones, before concluding something is
+  missing). Verify what a grant is actually used for before assuming a removal is risky — here,
+  most of the risk was in keeping it.
 - **The role is kept, not deleted.** The KMS key policy, the state bucket policy and the
   member-role StackSet trust all still name it by ARN.
 
@@ -34,10 +38,83 @@ Two things worth carrying forward from how that was done:
 member role carries `iam:*`, `s3:*`, `kms:*`, `lambda:*`, `rds:*`, `route53:*`, `cloudfront:*` on
 `Resource: "*"`. So a plan-phase token — which runs unattended on every push — can assume its way
 to full write in every member account. The claim below that a compromised plan token "can never
-mutate real infrastructure, full stop" is **not true today**. Fixing it properly needs a second,
-read-only member role vended by the same StackSet and a way for the pipeline to pass a different
-role ARN per phase, which is a change across `github-automation` and every consuming repo — not a
-one-line fix, and not yet done.
+mutate real infrastructure, full stop" is **not true today**.
+
+### First half done, 2026-07-29: a genuinely read-only member role exists
+
+`hcp-cmc-euw1-platform-cicd-readonly-role` — same StackSet, same trust condition (the three
+management-account OIDC role principals, same `aws:PrincipalOrgID` check), exactly one attached
+policy: AWS-managed `ReadOnlyAccess`, no inline policy. Live in all 6 member accounts, verified:
+`ManagedPolicyArns == [ReadOnlyAccess]` exactly, zero inline policies, and a real
+`sts:AssumeRole AccessDenied` confirms the trust genuinely excludes anything outside the three
+OIDC principals (tried from an SSO AdministratorAccess session — not in the Principal list).
+
+**Nothing assumes it yet.** `plan_oidc_policy` still only grants `sts:AssumeRole` on the write
+role. This change has zero effect on current behavior — it's scaffolding, not the fix. See
+`aws-terraform-platform-seed` PR (branch `feat/readonly-member-role-scaffolding`) for the full
+verification detail.
+
+### Second half — not done, and genuinely breaking. Read this before touching it.
+
+The reason this wasn't finished in one pass: every consuming repo's Terraform **provider** block
+hardcodes the write role's name for cross-account assume, e.g.:
+
+```hcl
+assume_role {
+  role_arn = "arn:aws:iam::${var.target_account_id}:role/hcp-cmc-euw1-platform-cicd-role"
+}
+```
+
+That's a single static value used for *both* `terraform plan` and `terraform apply` — Terraform's
+own provider config doesn't know which OIDC role (plan vs apply) authenticated the CI job that's
+running it. The moment `plan_oidc_policy` stops trusting the write role, every repo's `terraform
+plan` breaks simultaneously with an `AssumeRole AccessDenied`, unless every repo is updated in the
+same wave.
+
+**The actual fix, staged so nothing breaks mid-rollout:**
+
+1. **Per repo**, add a variable for the role name instead of hardcoding it:
+   ```hcl
+   variable "cicd_role_name" {
+     type    = string
+     default = "hcp-cmc-euw1-platform-cicd-role"  # keep the write role as default — no behavior change yet
+   }
+   ```
+   and reference `var.cicd_role_name` in the provider's `assume_role` block instead of the literal.
+   This step alone changes nothing — verify with a real `terraform plan` before proceeding.
+
+2. **Per repo's CI workflow**, pass a different value per phase via each reusable workflow's
+   `tf_vars` input:
+   - `reusable-tf-plan-encrypt.yaml` (the Plan job): `tf_vars: '{"cicd_role_name":
+     "hcp-cmc-euw1-platform-cicd-readonly-role"}'`
+   - `reusable-tf-apply-decrypt.yaml` (the Apply job): leave `tf_vars` unset, or set it explicitly
+     to the write role name — either way, Apply keeps using the write role.
+
+3. **Prove it on ONE target before touching anything else** — a dormant, non-production spoke.
+   `hcp-qa` (via `aws-baselines`' `qa` job chain) is the obvious candidate: real StackSet-vended
+   infrastructure, genuinely idle. Run its Plan job with the readonly role wired in and confirm:
+   - Plan succeeds (proves `ReadOnlyAccess` covers everything a real `terraform plan` needs to
+     read — this is the actual risk: a `data` source or resource type `ReadOnlyAccess` doesn't
+     cover would fail plan with an opaque `AccessDenied` mid-refresh, not a clean pre-flight error)
+   - Apply still succeeds afterward on the *unchanged* write role
+   - `plan_oidc_policy`'s grant on the write role is **not yet removed** at this point — both
+     roles stay assumable by plan until every repo has been proven
+
+4. **Roll out repo by repo**, re-running each repo's own pipeline after its change and confirming
+   Plan is still green, in this order (lowest to highest stakes): `aws-baselines` (remaining 5
+   spokes), `aws-accounts`, `aws-org`, `personal-ai-cloud`, `craighoad-blog`,
+   `craighoad-portfolio-website`, `terrorgems-platform` (once its separate `ci.yml` app-level
+   failures are fixed and it's actually reachable again — see REPOS.md).
+
+5. **Only once every repo above is confirmed working on the readonly role**, remove
+   `plan_oidc_policy`'s grant on the write role. This is the step that actually closes the gap —
+   everything before it is reversible groundwork, this step is not (any repo missed in step 4
+   breaks the instant this lands).
+
+Don't skip step 3. `ReadOnlyAccess` is broad but not exhaustive — the failure mode if it's missing
+something is a plan job failing mid-refresh with a confusing `AccessDenied` on some specific
+resource type, not a clean rejection, and that's a much worse thing to discover for the first time
+against `craighoad.com` or `terrorgems.com` than against a dormant QA account.
 
 ## The split: plan / apply / module-skills
 
