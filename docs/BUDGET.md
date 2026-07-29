@@ -9,6 +9,43 @@ what isn't.
 **If you are a Claude session about to provision a new AWS resource type: check this file first.
 If the service/action isn't in the "in active use" list below, don't assume it's free — ask.**
 
+## Real, measured spend — 2026-07-29
+
+Live `aws ce get-cost-and-usage`, 1–29 July 2026. **$21.44 actual**, Cost Explorer forecasting
+**$46.71**. `platform-monthly-budget` ($5 limit, platform accounts only) was at **$5.75 — already
+breached**. The estimates previously in this file were substantially low.
+
+| Service | July MTD | Attribution |
+|---|---|---|
+| AWS WAF | $7.22 | terrorgems-prod — **orphaned, deleted 2026-07-29** |
+| AmazonCloudWatch | $3.96 | `DashboardsUsageHour-Basic`, all 6 member accounts — **deleted 2026-07-29** |
+| KMS | $3.59 | $2.70 terrorgems (3 CMKs), $0.90 mgmt (state key) |
+| Tax | $3.58 | |
+| Secrets Manager | $1.89 | 3 terrorgems + 2 × `github/hcp/config` |
+| Route 53 | $1.02 | craighoad.com + terrorgems.com zones |
+| S3 / API GW / CE API | $0.18 | |
+
+**Two findings worth naming, because both contradicted this file:**
+
+1. **`shared-waf-for-static-websites`** (CLOUDFRONT scope, us-east-1, 3 rules, terrorgems-prod) was
+   **attached to nothing** — `list-resources-for-web-acl` empty, and the terrorgems.com
+   distribution's `WebACLId` blank. It existed in no Terraform file anywhere. $7.22/month
+   (~$87/year) protecting nothing. This file previously listed WAF as legitimate TerrorGems product
+   spend; it wasn't. **Deleted.**
+2. **The cost-tracking module's own CloudWatch dashboard was the largest platform-side cost line.**
+   `hcp-platform-cost-overview` was billed *per account it was applied to*, not once centrally —
+   $1.46 + $0.58 + $0.48 × 4 = ~$3.96/month, for two widgets showing `AWS/Billing
+   EstimatedCharges`, which Cost Explorer displays for free. **Deleted from all six accounts and
+   removed from the module** (`aws-terraform-platform-aws-baselines` PR #9). Do not re-add a
+   dashboard to a module that fans out across every vended account.
+
+Post-cleanup run rate is roughly **$3/month** (state CMK $0.90, two config secrets $0.80, two
+hosted zones $1.02, S3 pennies) plus ~$15/domain/year in registrar renewals. Remaining reducible
+items, none yet actioned: two terrorgems CMKs sharing the identical description `KMS key for
+DynamoDB encryption in prd environment` (one likely orphaned, ~$1/month), and the `gcp-gemini-key`
+/ `youtube-api-key` secrets in terrorgems (~$0.80/month, `asatst`-era leftovers alongside a dead
+Step Functions estate).
+
 **Scope: this applies to the platform/landing-zone itself and its shared accounts (management,
 security, infrastructure) and to `personal-ai-cloud`** — not retroactively to already-established
 products with their own separate cost model. `hcp-terrorgems-prod` (TerrorGems) is a real product
@@ -136,6 +173,13 @@ types — a $0 budget with zero EC2 at all would be more restrictive than this e
 guardrail against a **future Claude session "helpfully" enabling them** — see
 [SECURITY_BASELINE.md](SECURITY_BASELINE.md) for why they're off by design, and
 [SECURITY_ROADMAP.md](SECURITY_ROADMAP.md) for when to turn them on.
+
+**This SCP is not managed by Terraform** — it was created by a raw `aws organizations
+create-policy` call and is absent from `aws-terraform-platform-aws-org`'s `var.scps` map. It is
+therefore not in any state file, will not be recreated if deleted, and no drift check will notice
+if it disappears. Confirmed live 2026-07-29: `p-5i30zmvq hcp-cost-guardrail` exists and is attached
+to `ou-4if6-on6pmizj` (Workloads/Prod) only. The entire $0 enforcement layer is click-ops. Adopting
+it into `var.scps` is outstanding work.
 
 **Status of this SCP**: `aws organizations create-policy`, policy ID `p-5i30zmvq`.
 `aws iam simulate-custom-policy` — the natural tool to test this against real role policies before
