@@ -6,25 +6,41 @@ right baseline regardless of budget. What's *not* here (GuardDuty, Config, Secur
 absent because those cost money, not because they were overlooked — see the end of this file and
 [SECURITY_ROADMAP.md](SECURITY_ROADMAP.md).
 
-> **Correction, 2026-07-29** — the three items struck through below were documented here as "on"
-> but were **not deployed anywhere in the estate**, confirmed by a live sweep of all 7 accounts
-> across eu-west-1/eu-west-2/us-east-1. This file asserted a posture that did not exist. Treat
-> everything in this file as a claim to verify, not a given, until each line has a live check
-> behind it.
+> **Correction, 2026-07-29** — a live sweep of all 7 accounts across
+> eu-west-1/eu-west-2/us-east-1 found that four things this file described as active controls did
+> not exist anywhere: CloudTrail, IAM Access Analyzer, account-level S3 block-public-access, and
+> enforced PR review. This file asserted a posture that was not real.
+>
+> CloudTrail and Access Analyzer have since been **built and verified live** (see below). The
+> other two remain open. **Treat every line in this file as a claim to verify, not a given, until
+> it has a live check behind it** — the failure mode here wasn't a wrong decision, it was
+> documentation drifting ahead of implementation and then being trusted.
 
 ## On, by design
 
-- ~~**CloudTrail (management events)** — free, org-wide, always on.~~ **NOT TRUE — no trail
-  exists.** `aws cloudtrail describe-trails` returns empty in management, hcp-audit,
-  hcp-log-archive, hcp-shared-services, hcp-qa and hcp-craighoad-prod, in all three approved
-  regions. The only trail anywhere is a legacy `asatst-prod-main-trail` in hcp-terrorgems-prod.
-  Consequence: `ProtectAuditLogs` (SCP `p-leebx0ta`) guards a trail that doesn't exist, and
-  hcp-audit/hcp-log-archive are empty accounts serving no purpose. There is no durable audit
-  record beyond CloudTrail Event History's rolling 90 days. An org-wide management-events trail
-  is genuinely free — this is an unimplemented intent, not a cost decision.
-- ~~**IAM Access Analyzer** — free, flags unintended external/cross-account access.~~
-  **NOT TRUE — no analyzer exists** in any account or region (`aws accessanalyzer list-analyzers`
-  empty everywhere). Also free; also unimplemented.
+- **CloudTrail (management events)** — org-wide, always on. **This was documented here for months
+  before it existed**: on 2026-07-29 `aws cloudtrail describe-trails` returned empty in every
+  account and every approved region (the only trail anywhere was a legacy `asatst-prod-main-trail`
+  in hcp-terrorgems-prod), meaning `ProtectAuditLogs` (SCP `p-leebx0ta`) guarded nothing and there
+  was no durable audit record beyond Event History's rolling 90 days. **Built and verified live
+  the same day** — `hcp-org-trail`, organization trail, multi-region, global service events, log
+  file validation on, `IsLogging: True`, delivering to `hcp-cmc-euw1-platform-cloudtrail-prd` in
+  hcp-log-archive (which until then was a vended account with no purpose at all). Confirmed
+  receiving real objects under `AWSLogs/o-h07s8pk406/<account>/` from multiple member accounts
+  across multiple regions. Because it's an organization trail created in the management account,
+  every future AVM-vended account is covered automatically with no per-account Terraform. Data
+  events (S3 object-level, Lambda invocations) are NOT enabled — `get-event-selectors` returns no
+  data resources, and that emptiness *is* the cost control: management events are free, data
+  events bill per event. Managed in `aws-terraform-platform-aws-org/cloudtrail.tf`.
+- **IAM Access Analyzer** — free, flags unintended external/cross-account access. **Same story**:
+  documented here but `aws accessanalyzer list-analyzers` returned empty in all 7 accounts and all
+  three regions on 2026-07-29. Now `hcp-org-external-access`, **ORGANIZATION** scope so one
+  analyzer covers every member account — account scope would have seen none of the member-account
+  side of this estate's real external-access surface (the two-hop OIDC chain, the StackSet-vended
+  member roles, the shared state bucket's cross-account grants). Managed in
+  `aws-terraform-platform-aws-org/security.tf`. Findings are not routed anywhere yet — no
+  EventBridge rule, no SNS — because there's no habit of triaging them yet; wire that up once
+  there is.
 - ~~**S3 block-public-access** — on for every bucket, always, no exceptions.~~ See the corrected
   entry below — the account-level control is absent and the SCP that was meant to enforce it was
   never deployed.
