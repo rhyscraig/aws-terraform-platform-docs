@@ -153,6 +153,22 @@ github_oidc_plan_subjects = [
                                                      # and reusable-tf-parse-config.yaml computes
                                                      # apply_env as "${org}-approve" - use that exact
                                                      # value, not a hand-picked environment name
+  "repo:{owner}/{repo}:pull_request",               # pr-validate.yml's checkov-scan/quality-gate/plan
+                                                     # jobs run on the pull_request event, not a push to
+                                                     # main or an environment - a DIFFERENT sub claim
+                                                     # from any of the three above. This was missing
+                                                     # from the empirically-derived list for months
+                                                     # because it was derived by testing deploy.yaml
+                                                     # (workflow_dispatch) runs, which never exercise a
+                                                     # pull_request-triggered sub claim. Real failure
+                                                     # confirmed 2026-08-09: aws-terraform-platform-
+                                                     # aws-org's Checkov job failed all 12
+                                                     # AssumeRoleWithWebIdentity retries with "Not
+                                                     # authorized" until this subject was added for that
+                                                     # repo. Fixed there only so far (see
+                                                     # aws-terraform-platform-seed PR #35) - every other
+                                                     # repo in this org likely has the same gap for its
+                                                     # own PR checks and hasn't been fixed yet.
 ]
 
 github_oidc_apply_subjects = [
